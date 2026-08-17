@@ -42,7 +42,7 @@ final class MenuController: NSObject, NSMenuDelegate {
             body.move(to: NSPoint(x: 2.2, y: 3.6))
             body.line(to: NSPoint(x: 2.2, y: 9.5))
             body.appendArc(withCenter: NSPoint(x: 9, y: 9.5), radius: 6.8,
-                           startAngle: 180, endAngle: 0, clockwise: false)
+                           startAngle: 180, endAngle: 0, clockwise: true)
             body.line(to: NSPoint(x: 15.8, y: 3.6))
             body.curve(to: NSPoint(x: 13.5, y: 3.6),
                        controlPoint1: NSPoint(x: 15.0, y: 1.7), controlPoint2: NSPoint(x: 14.3, y: 1.7))
@@ -69,7 +69,7 @@ final class MenuController: NSObject, NSMenuDelegate {
                 let mouth = NSBezierPath()
                 mouth.move(to: NSPoint(x: 7.2, y: 6.4))
                 mouth.appendArc(withCenter: NSPoint(x: 9, y: 6.4), radius: 1.8,
-                                startAngle: 180, endAngle: 360, clockwise: true)
+                                startAngle: 180, endAngle: 360, clockwise: false)
                 mouth.lineWidth = 1.1
                 mouth.stroke()
             }
