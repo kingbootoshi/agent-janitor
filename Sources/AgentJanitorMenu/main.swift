@@ -25,14 +25,54 @@ final class MenuController: NSObject, NSMenuDelegate {
         let pending = summary?["pending"] as? Int ?? -1
         DispatchQueue.main.async { [weak self] in
             guard let self, let button = self.statusItem.button else { return }
-            button.image = Self.booIcon(alert: pending != 0)
-            button.imagePosition = .imageLeft
-            let count = pending > 0 ? " \(pending)" : (pending < 0 ? " ?" : "")
-            button.attributedTitle = NSAttributedString(string: count, attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
-                .baselineOffset: 0.5
-            ])
+            button.image = Self.broomIcon()
+            button.imagePosition = .imageOnly
+            button.attributedTitle = NSAttributedString(string: "")
+            button.alphaValue = pending == 0 ? 0.55 : 1.0
+            button.toolTip = pending > 0 ? "\(pending) flagged" : "all clean"
         }
+    }
+
+    static func broomIcon() -> NSImage {
+        let size = NSSize(width: 18, height: 18)
+        let img = NSImage(size: size, flipped: false) { _ in
+            NSColor.black.setStroke()
+            NSColor.black.setFill()
+
+            let handle = NSBezierPath()
+            handle.move(to: NSPoint(x: 16.6, y: 16.6))
+            handle.line(to: NSPoint(x: 11.6, y: 11.6))
+            handle.lineWidth = 1.9
+            handle.lineCapStyle = .round
+            handle.stroke()
+
+            let fan = NSBezierPath()
+            fan.move(to: NSPoint(x: 13.4, y: 9.4))
+            fan.line(to: NSPoint(x: 6.2, y: 0.6))
+            fan.line(to: NSPoint(x: 3.2, y: 1.2))
+            fan.line(to: NSPoint(x: 1.2, y: 3.2))
+            fan.line(to: NSPoint(x: 0.6, y: 6.2))
+            fan.line(to: NSPoint(x: 9.4, y: 13.4))
+            fan.curve(to: NSPoint(x: 13.4, y: 9.4),
+                      controlPoint1: NSPoint(x: 12.2, y: 12.2), controlPoint2: NSPoint(x: 12.2, y: 12.2))
+            fan.close()
+            fan.fill()
+
+            NSGraphicsContext.current?.compositingOperation = .destinationOut
+            let band = NSBezierPath()
+            band.move(to: NSPoint(x: 12.4, y: 8.2))
+            band.line(to: NSPoint(x: 8.2, y: 12.4))
+            band.lineWidth = 1.1
+            band.stroke()
+            let notch = NSBezierPath()
+            notch.move(to: NSPoint(x: 9.2, y: 9.2))
+            notch.line(to: NSPoint(x: 2.0, y: 2.0))
+            notch.lineWidth = 0.8
+            notch.stroke()
+            return true
+        }
+        img.isTemplate = true
+        return img
     }
 
     static func booIcon(alert: Bool) -> NSImage {
@@ -79,69 +119,77 @@ final class MenuController: NSObject, NSMenuDelegate {
         return img
     }
 
+    struct Row {
+        var keyId: String
+        var signature: String
+        var project: String
+        var rule: String
+        var age: Int
+        var footprint: UInt64
+        var reason: String
+        var command: String
+        var lunaVerdict: String?
+        var lunaReason: String?
+    }
+
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let summary = daemonRequest(["cmd": "summary"])
         let flagReply = daemonRequest(["cmd": "flags"])
         flags = flagReply?["flags"] as? [[String: Any]] ?? []
+        let rows = flags.map { f in
+            Row(keyId: f["keyId"] as? String ?? "",
+                signature: f["signature"] as? String ?? "?",
+                project: f["project"] as? String ?? "",
+                rule: f["rule"] as? String ?? "",
+                age: f["ageSeconds"] as? Int ?? 0,
+                footprint: (f["footprint"] as? NSNumber)?.uint64Value ?? 0,
+                reason: f["reason"] as? String ?? "",
+                command: f["command"] as? String ?? "",
+                lunaVerdict: f["lunaVerdict"] as? String,
+                lunaReason: f["lunaReason"] as? String)
+        }
 
         if let s = summary {
-            let mode = s["mode"] as? String ?? "?"
             let selfMB = String(format: "%.0f", s["self_footprint_mb"] as? Double ?? 0)
-            let header = NSMenuItem(title: "mode \(mode) · tracking \(s["tracked"] ?? 0) · self \(selfMB)MB", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
-            let pressure = NSMenuItem(title: "pressure \(s["pressure"] ?? "?") · swap \(Int(s["swap_mb"] as? Double ?? 0))MB", action: nil, keyEquivalent: "")
-            pressure.isEnabled = false
-            menu.addItem(pressure)
+            addInfo(menu, "\(s["mode"] ?? "?") mode · \(s["tracked"] ?? 0) tracked · janitor \(selfMB)MB · pressure \(s["pressure"] ?? "?")")
         } else {
-            let dead = NSMenuItem(title: "daemon unreachable", action: nil, keyEquivalent: "")
-            dead.isEnabled = false
-            menu.addItem(dead)
+            addInfo(menu, "daemon unreachable")
         }
         menu.addItem(.separator())
 
-        if flags.isEmpty {
-            let clean = NSMenuItem(title: "nothing flagged - all clean", action: nil, keyEquivalent: "")
-            clean.isEnabled = false
-            menu.addItem(clean)
+        if rows.isEmpty {
+            addInfo(menu, "all clean - nothing flagged")
         }
 
-        for (i, f) in flags.enumerated() {
-            let sig = f["signature"] as? String ?? "?"
-            let project = f["project"] as? String ?? ""
-            let age = f["ageSeconds"] as? Int ?? 0
-            let fp = (f["footprint"] as? NSNumber)?.uint64Value ?? 0
-            let ageStr = age > 86400 ? String(format: "%.1fd", Double(age) / 86400) : String(format: "%.1fh", Double(age) / 3600)
-            let fpStr = fp > 1_073_741_824
-                ? String(format: "%.1fGiB", Double(fp) / 1_073_741_824)
-                : String(format: "%.0fMiB", Double(fp) / 1_048_576)
-            let title = "\(sig)\(project.isEmpty ? "" : " · \(project)") · \(ageStr) · \(fpStr)"
+        var groups: [String: [Row]] = [:]
+        for r in rows { groups[r.signature + "|" + r.project, default: []].append(r) }
+        let ordered = groups.values.sorted {
+            $0.reduce(0) { $1.footprint > 100_000_000 ? $0 + $1.footprint : $0 + $1.footprint } >
+            $1.reduce(0) { $1.footprint > 100_000_000 ? $0 + $1.footprint : $0 + $1.footprint }
+        }
 
-            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            let sub = NSMenu()
-
-            let reason = NSMenuItem(title: f["reason"] as? String ?? "", action: nil, keyEquivalent: "")
-            reason.isEnabled = false
-            sub.addItem(reason)
-            if let lv = f["lunaVerdict"] as? String {
-                let luna = NSMenuItem(title: "luna: \(lv) - \(f["lunaReason"] as? String ?? "")", action: nil, keyEquivalent: "")
-                luna.isEnabled = false
-                sub.addItem(luna)
+        for group in ordered {
+            if group.count == 1 {
+                menu.addItem(flagItem(group[0]))
+            } else {
+                let total = group.reduce(UInt64(0)) { $0 + $1.footprint }
+                let ages = group.map(\.age)
+                let first = group[0]
+                let title = "\(glyph(group)) \(group.count)× \(first.signature)\(first.project.isEmpty ? "" : " · \(first.project)") · \(fmtAge(ages.min() ?? 0))-\(fmtAge(ages.max() ?? 0)) · \(fmtBytes(total))"
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                let sub = NSMenu()
+                let keys = group.map(\.keyId)
+                sub.addItem(bulk("Terminate all \(group.count)", #selector(killMany(_:)), keys))
+                sub.addItem(bulk("Keep all (project, 30d)", #selector(keepMany(_:)), keys))
+                sub.addItem(bulk("Dismiss all", #selector(dismissMany(_:)), keys))
+                sub.addItem(.separator())
+                for r in group.sorted(by: { $0.footprint > $1.footprint }) {
+                    sub.addItem(flagItem(r, compact: true))
+                }
+                item.submenu = sub
+                menu.addItem(item)
             }
-            let cmdLine = NSMenuItem(title: String((f["command"] as? String ?? "").prefix(80)), action: nil, keyEquivalent: "")
-            cmdLine.isEnabled = false
-            sub.addItem(cmdLine)
-            sub.addItem(.separator())
-
-            sub.addItem(action("Keep (this instance)", #selector(keepInstance(_:)), i))
-            sub.addItem(action("Keep for this project (30d)", #selector(keepProject(_:)), i))
-            sub.addItem(action("Terminate", #selector(killOne(_:)), i))
-            sub.addItem(action("Force Kill", #selector(forceKill(_:)), i))
-            sub.addItem(action("Dismiss", #selector(dismissOne(_:)), i))
-
-            item.submenu = sub
-            menu.addItem(item)
         }
 
         menu.addItem(.separator())
@@ -153,53 +201,130 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(quit)
     }
 
-    private func action(_ title: String, _ sel: Selector, _ tag: Int) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: sel, keyEquivalent: "")
-        item.target = self
-        item.tag = tag
+    private func glyph(_ group: [Row]) -> String {
+        let verdicts = Set(group.compactMap(\.lunaVerdict))
+        if verdicts == ["dead"] { return "✕" }
+        if verdicts == ["active"] { return "●" }
+        if verdicts.isEmpty { return "•" }
+        return "?"
+    }
+
+    private func flagItem(_ r: Row, compact: Bool = false) -> NSMenuItem {
+        let title = compact
+            ? "pid \(r.keyId.split(separator: ".").first.map(String.init) ?? "?") · \(fmtAge(r.age)) · \(fmtBytes(r.footprint))"
+            : "\(glyph([r])) \(r.signature)\(r.project.isEmpty ? "" : " · \(r.project)") · \(fmtAge(r.age)) · \(fmtBytes(r.footprint))"
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        for line in wrap(r.reason, 46) { addInfo(sub, line) }
+        if let lv = r.lunaVerdict {
+            for line in wrap("luna \(lv): \(r.lunaReason ?? "")", 46) { addInfo(sub, line) }
+        }
+        addInfo(sub, "…" + String(r.command.suffix(44)))
+        sub.addItem(.separator())
+        sub.addItem(single("Keep this instance", #selector(keepInstance(_:)), r.keyId))
+        sub.addItem(single("Keep project 30d", #selector(keepProject(_:)), r.keyId))
+        sub.addItem(single("Terminate", #selector(killOne(_:)), r.keyId))
+        sub.addItem(single("Force Kill…", #selector(forceKill(_:)), r.keyId))
+        sub.addItem(single("Dismiss", #selector(dismissOne(_:)), r.keyId))
+        item.submenu = sub
         return item
     }
 
-    private func key(_ tag: Int) -> String? {
-        guard tag < flags.count else { return nil }
-        return flags[tag]["keyId"] as? String
+    private func addInfo(_ menu: NSMenu, _ text: String) {
+        let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
+    }
+
+    private func wrap(_ text: String, _ width: Int) -> [String] {
+        var lines: [String] = []
+        var current = ""
+        for word in text.split(separator: " ") {
+            if current.count + word.count + 1 > width && !current.isEmpty {
+                lines.append(current)
+                current = String(word)
+            } else {
+                current += current.isEmpty ? String(word) : " \(word)"
+            }
+            if lines.count == 3 { return lines }
+        }
+        if !current.isEmpty { lines.append(current) }
+        return lines
+    }
+
+    private func fmtAge(_ s: Int) -> String {
+        s > 86400 ? String(format: "%.1fd", Double(s) / 86400) : String(format: "%.1fh", Double(s) / 3600)
+    }
+
+    private func fmtBytes(_ b: UInt64) -> String {
+        b > 1_073_741_824 ? String(format: "%.1fGiB", Double(b) / 1_073_741_824)
+                          : String(format: "%.0fMiB", Double(b) / 1_048_576)
+    }
+
+    private func single(_ title: String, _ sel: Selector, _ key: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+        item.target = self
+        item.representedObject = [key]
+        return item
+    }
+
+    private func bulk(_ title: String, _ sel: Selector, _ keys: [String]) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+        item.target = self
+        item.representedObject = keys
+        return item
+    }
+
+    private func keys(_ sender: NSMenuItem) -> [String] {
+        sender.representedObject as? [String] ?? []
     }
 
     @objc func keepInstance(_ sender: NSMenuItem) {
-        guard let k = key(sender.tag) else { return }
-        _ = daemonRequest(["cmd": "keep", "key": k, "scope": "instance"])
+        for k in keys(sender) { _ = daemonRequest(["cmd": "keep", "key": k, "scope": "instance"]) }
         refreshIcon()
     }
 
     @objc func keepProject(_ sender: NSMenuItem) {
-        guard let k = key(sender.tag) else { return }
-        _ = daemonRequest(["cmd": "keep", "key": k, "scope": "project"])
+        for k in keys(sender) { _ = daemonRequest(["cmd": "keep", "key": k, "scope": "project"]) }
         refreshIcon()
     }
 
+    @objc func keepMany(_ sender: NSMenuItem) { keepProject(sender) }
+
     @objc func killOne(_ sender: NSMenuItem) {
-        guard let k = key(sender.tag) else { return }
-        _ = daemonRequest(["cmd": "kill", "key": k, "force": false])
+        for k in keys(sender) { _ = daemonRequest(["cmd": "kill", "key": k, "force": false]) }
+        refreshIcon()
+    }
+
+    @objc func killMany(_ sender: NSMenuItem) {
+        let list = keys(sender)
+        let alert = NSAlert()
+        alert.messageText = "Terminate \(list.count) processes?"
+        alert.informativeText = "Each gets identity revalidation and SIGTERM. Survivors stay flagged."
+        alert.addButton(withTitle: "Terminate All")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        for k in list { _ = daemonRequest(["cmd": "kill", "key": k, "force": false]) }
         refreshIcon()
     }
 
     @objc func forceKill(_ sender: NSMenuItem) {
-        guard let k = key(sender.tag) else { return }
         let alert = NSAlert()
-        alert.messageText = "Force kill this process?"
-        alert.informativeText = flags[sender.tag]["command"] as? String ?? ""
+        alert.messageText = "Force kill (SIGKILL)?"
+        alert.informativeText = "No cleanup, no state flush. Only for processes that ignored Terminate."
         alert.addButton(withTitle: "SIGKILL")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        _ = daemonRequest(["cmd": "kill", "key": k, "force": true])
+        for k in keys(sender) { _ = daemonRequest(["cmd": "kill", "key": k, "force": true]) }
         refreshIcon()
     }
 
     @objc func dismissOne(_ sender: NSMenuItem) {
-        guard let k = key(sender.tag) else { return }
-        _ = daemonRequest(["cmd": "dismiss", "key": k])
+        for k in keys(sender) { _ = daemonRequest(["cmd": "dismiss", "key": k]) }
         refreshIcon()
     }
+
+    @objc func dismissMany(_ sender: NSMenuItem) { dismissOne(sender) }
 
     @objc func toggleMode(_ sender: NSMenuItem) {
         let current = daemonRequest(["cmd": "summary"])?["mode"] as? String ?? "audit"
