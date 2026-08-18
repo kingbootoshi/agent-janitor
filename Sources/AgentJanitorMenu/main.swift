@@ -9,6 +9,7 @@ final class MenuController: NSObject, NSMenuDelegate {
 
     func start() {
         menu.delegate = self
+        menu.autoenablesItems = false
         statusItem.menu = menu
         refreshIcon()
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -263,9 +264,10 @@ final class MenuController: NSObject, NSMenuDelegate {
     private func addMono(_ menu: NSMenu, _ text: String) {
         let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         item.attributedTitle = NSAttributedString(string: text, attributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .regular)
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .regular),
+            .foregroundColor: NSColor.labelColor
         ])
-        item.isEnabled = false
+        item.isEnabled = true
         menu.addItem(item)
     }
 

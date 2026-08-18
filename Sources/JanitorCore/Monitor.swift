@@ -179,6 +179,17 @@ public final class Monitor {
             return
         }
 
+        if info.ttyDev <= 0, !["claude"].contains(info.signature),
+           let d = store.sampleDeltas(keyId, windowSeconds: 1800) {
+            let cpuPct = Double(d.cpuNs) / (1800 * 1_000_000_000) * 100
+            if cpuPct > 50 {
+                raiseFlag(info, rule: "runawayCpu",
+                          reason: "burning \(Int(cpuPct))% CPU for 30m+ with no terminal - stuck loop?",
+                          new: &flaggedNew)
+                return
+            }
+        }
+
         if gib >= config.bigProcGiB, !bigNotified.contains(keyId) {
             if let d = store.sampleDeltas(keyId, windowSeconds: 360), d.growth >= 0 {
                 bigNotified.insert(keyId)
@@ -382,7 +393,18 @@ public final class Monitor {
         let flags = flagList().filter { $0.lunaVerdict == nil }
         guard !flags.isEmpty else { return }
         lastLunaAt = Date()
-        Luna.triage(flags: flags, model: config.lunaModel) { [weak self] verdicts in
+        var evidence: [String: String] = [:]
+        for f in flags {
+            guard let info = tracked[f.pid], info.key.id == f.keyId else { continue }
+            let sock = Probe.sockets(f.pid)
+            var cpu = "unknown"
+            if let d = store.sampleDeltas(f.keyId, windowSeconds: 1800) {
+                cpu = String(format: "%.1f%%", Double(d.cpuNs) / (1800 * 1_000_000_000) * 100)
+            }
+            let parent = Probe.bsdInfo(info.key.pid)?.ppid == 1 ? "dead(launchd)" : "alive"
+            evidence[f.keyId] = "cpu30m=\(cpu) tty=\(info.ttyDev > 0 ? "yes" : "no") parent=\(parent) listeners=\(sock.listeners.count) established=\(sock.established)"
+        }
+        Luna.triage(flags: flags, evidence: evidence, model: config.lunaModel) { [weak self] verdicts in
             guard let self else { return }
             self.queue.async {
                 for v in verdicts {

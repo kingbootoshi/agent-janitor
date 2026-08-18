@@ -11,18 +11,18 @@ public enum Luna {
         ProcessInfo.processInfo.environment["OPENROUTER_API_KEY"]
     }
 
-    public static func triage(flags: [FlagRecord], model: String, done: @escaping ([LunaVerdict]) -> Void) {
+    public static func triage(flags: [FlagRecord], evidence: [String: String] = [:], model: String, done: @escaping ([LunaVerdict]) -> Void) {
         guard let key = apiKey else { return done([]) }
         let lines = flags.map { f in
-            "id=\(f.keyId) rule=\(f.rule) sig=\(f.signature) project=\(f.project) age=\(f.ageSeconds)s footprint=\(f.footprint / 1_048_576)MB cmd=\(f.command) reason=\(f.reason)"
+            "id=\(f.keyId) rule=\(f.rule) sig=\(f.signature) project=\(f.project) age=\(f.ageSeconds)s footprint=\(f.footprint / 1_048_576)MB \(evidence[f.keyId] ?? "") cmd=\(f.command) reason=\(f.reason)"
         }.joined(separator: "\n")
 
         let system = """
-        You triage flagged processes on a macOS AI-agent dev workstation. Coding agents spawn dev servers, shells, and helpers that outlive their sessions. Classify each flagged process:
-        dead - orphaned leftover, safe to terminate
-        active - legitimately in use, leave alone
-        ambiguous - needs the human's judgment
-        Prefer ambiguous whenever evidence is thin. Never mark agent CLIs, training, or inference processes dead. Report every id exactly once via the tool.
+        You triage flagged processes on a macOS AI-agent dev workstation. Coding agents spawn dev servers, shells, and helpers that outlive their sessions. Each line carries hard evidence: cpu30m (CPU percent over the last 30 minutes), tty (attached terminal), parent (alive or reparented to launchd), listeners and established (socket counts). Classify each flagged process:
+        dead - orphaned leftover, safe to terminate: parent dead, no tty, near-zero cpu, no established connections, and the command is a scratch tool (http.server, one-shot ssh, stale dev server)
+        active - legitimately in use: tty attached, or established connections, or meaningful cpu that matches real work
+        ambiguous - evidence genuinely conflicts
+        A process burning high cpu with a dead parent and no tty for days is a stuck loop - call it dead and say why. Commit to dead or active when the evidence lines up; reserve ambiguous for real conflicts. Never mark training or inference jobs dead. Report every id exactly once via the tool.
         """
 
         let tool: [String: Any] = [

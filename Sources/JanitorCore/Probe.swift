@@ -49,13 +49,20 @@ public enum Probe {
         )
     }
 
+    private static let timebase: (numer: UInt64, denom: UInt64) = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return (UInt64(info.numer), UInt64(info.denom))
+    }()
+
     public static func rusage(_ pid: Int32) -> RusageFact? {
         var ru = rusage_info_v4()
         guard aj_rusage(pid, &ru) == 0 else { return nil }
+        let ticks = ru.ri_user_time &+ ru.ri_system_time
         return RusageFact(
             footprint: ru.ri_phys_footprint,
             resident: ru.ri_resident_size,
-            cpuNs: ru.ri_user_time &+ ru.ri_system_time,
+            cpuNs: ticks.multipliedReportingOverflow(by: timebase.numer).partialValue / max(timebase.denom, 1),
             diskR: ru.ri_diskio_bytesread,
             diskW: ru.ri_diskio_byteswritten,
             logicalWrites: ru.ri_logical_writes
