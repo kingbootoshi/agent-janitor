@@ -1,5 +1,7 @@
 # agent-janitor
 
+![agent-janitor](assets/hero.jpeg)
+
 Orphan-process janitor with session attribution for AI-agent dev workstations. Watches every user process, remembers who spawned what before macOS reparents orphans to launchd, flags leftovers with evidence, and reaps only what is provably dead.
 
 The problem: coding agents (Claude Code, Codex, and friends) spawn dev servers, shells, and helpers that outlive their sessions. macOS reparents them to launchd, their history evaporates, and RAM fills with week-old `python -m http.server` processes nobody remembers. Generic RAM cleaners solve the wrong problem - green memory pressure is healthy macOS behavior. The real fix is lineage: know who spawned what, prove nothing interacts with it, then reap with consent.
