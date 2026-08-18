@@ -158,6 +158,30 @@ final class MenuController: NSObject, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
+        if let top = daemonRequest(["cmd": "top", "n": 8]), let vm = top["vm"] as? [String: Any] {
+            let gb = { (k: String) in Double((vm[k] as? NSNumber)?.uint64Value ?? 0) / 1_073_741_824 }
+            addMono(menu, String(format: "memory used  %5.1f / %.0f GB", gb("used"), gb("physical")))
+            addMono(menu, String(format: "app %.1f · wired %.1f · compressed %.1f", gb("app"), gb("wired"), gb("compressed")))
+            addMono(menu, String(format: "cached files %.1f (frees itself)", gb("cached")))
+            menu.addItem(.separator())
+            let groups = top["groups"] as? [[String: Any]] ?? []
+            var yoursTotal: UInt64 = 0
+            for g in groups {
+                let bytes = (g["bytes"] as? NSNumber)?.uint64Value ?? 0
+                yoursTotal += bytes
+                let count = g["count"] as? Int ?? 0
+                let sig = String((g["sig"] as? String ?? "?").prefix(22))
+                addMono(menu, String(format: "%7@  %@%@", fmtBytes(bytes) as NSString, sig, count > 1 ? " ×\(count)" : ""))
+            }
+            let otherBytes = (top["other_bytes"] as? NSNumber)?.uint64Value ?? 0
+            let otherCount = top["other_count"] as? Int ?? 0
+            yoursTotal += otherBytes
+            addMono(menu, String(format: "%7@  %d smaller processes", fmtBytes(otherBytes) as NSString, otherCount))
+            let systemBytes = max(0, Int64((vm["app"] as? NSNumber)?.int64Value ?? 0) - Int64(yoursTotal))
+            addMono(menu, String(format: "%7@  system + other users", fmtBytes(UInt64(systemBytes)) as NSString))
+            menu.addItem(.separator())
+        }
+
         if rows.isEmpty {
             addInfo(menu, "all clean - nothing flagged")
         }
@@ -232,6 +256,15 @@ final class MenuController: NSObject, NSMenuDelegate {
 
     private func addInfo(_ menu: NSMenu, _ text: String) {
         let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
+    }
+
+    private func addMono(_ menu: NSMenu, _ text: String) {
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        item.attributedTitle = NSAttributedString(string: text, attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .regular)
+        ])
         item.isEnabled = false
         menu.addItem(item)
     }

@@ -170,6 +170,43 @@ public enum Probe {
         return handles
     }
 
+    public struct VMBreakdown {
+        public var physical: UInt64
+        public var appBytes: UInt64
+        public var wiredBytes: UInt64
+        public var compressedBytes: UInt64
+        public var cachedBytes: UInt64
+        public var usedBytes: UInt64 { appBytes + wiredBytes + compressedBytes }
+    }
+
+    public static func vmBreakdown() -> VMBreakdown? {
+        var memSize: UInt64 = 0
+        var memLen = MemoryLayout<UInt64>.size
+        sysctlbyname("hw.memsize", &memSize, &memLen, nil, 0)
+
+        var stats = vm_statistics64_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &stats) { p in
+            p.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return nil }
+        var pageSize: vm_size_t = 0
+        host_page_size(mach_host_self(), &pageSize)
+        let page = UInt64(pageSize)
+
+        let internalPages = UInt64(stats.internal_page_count)
+        let purgeable = UInt64(stats.purgeable_count)
+        let app = (internalPages > purgeable ? internalPages - purgeable : 0) * page
+        return VMBreakdown(
+            physical: memSize,
+            appBytes: app,
+            wiredBytes: UInt64(stats.wire_count) * page,
+            compressedBytes: UInt64(stats.compressor_page_count) * page,
+            cachedBytes: (UInt64(stats.external_page_count) + purgeable) * page)
+    }
+
     public static func swapUsedMB() -> Double {
         var swap = xsw_usage()
         var len = MemoryLayout<xsw_usage>.size

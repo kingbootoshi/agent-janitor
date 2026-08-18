@@ -70,6 +70,19 @@ public final class SocketServer {
             guard let data = try? enc.encode(flags),
                   let arr = try? JSONSerialization.jsonObject(with: data) else { return ["ok": false] }
             return ["ok": true, "flags": arr]
+        case "top":
+            let limit = obj["n"] as? Int ?? 8
+            let (groups, otherBytes, otherCount) = monitor.sync { $0.topConsumers(limit: limit) }
+            var reply: [String: Any] = ["ok": true]
+            reply["groups"] = groups.map { ["sig": $0.signature, "count": $0.count, "bytes": $0.bytes] }
+            reply["other_bytes"] = otherBytes
+            reply["other_count"] = otherCount
+            if let vm = Probe.vmBreakdown() {
+                reply["vm"] = ["physical": vm.physical, "app": vm.appBytes, "wired": vm.wiredBytes,
+                               "compressed": vm.compressedBytes, "cached": vm.cachedBytes,
+                               "used": vm.usedBytes, "swap_mb": Probe.swapUsedMB()]
+            }
+            return reply
         case "keep":
             guard let keyId = obj["key"] as? String else { return ["ok": false, "error": "key required"] }
             let scope = obj["scope"] as? String ?? "instance"

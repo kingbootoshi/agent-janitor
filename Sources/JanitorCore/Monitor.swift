@@ -320,6 +320,25 @@ public final class Monitor {
             uptimeSeconds: Int(Date().timeIntervalSince(startedAt)))
     }
 
+    public struct ConsumerGroup {
+        public var signature: String
+        public var count: Int
+        public var bytes: UInt64
+    }
+
+    public func topConsumers(limit: Int) -> (groups: [ConsumerGroup], otherBytes: UInt64, otherCount: Int) {
+        var bySig: [String: (Int, UInt64)] = [:]
+        for (_, info) in tracked where info.footprint > 0 {
+            let cur = bySig[info.signature] ?? (0, 0)
+            bySig[info.signature] = (cur.0 + 1, cur.1 + info.footprint)
+        }
+        let sorted = bySig.map { ConsumerGroup(signature: $0.key, count: $0.value.0, bytes: $0.value.1) }
+            .sorted { $0.bytes > $1.bytes }
+        let top = Array(sorted.prefix(limit))
+        let rest = sorted.dropFirst(limit)
+        return (top, rest.reduce(0) { $0 + $1.bytes }, rest.reduce(0) { $0 + $1.count })
+    }
+
     public func flagList() -> [FlagRecord] {
         store.pendingFlags().compactMap { f in
             guard let row = store.processRow(f.keyId) else { return nil }

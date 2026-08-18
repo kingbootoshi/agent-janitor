@@ -37,6 +37,29 @@ case "status":
     out("swap:      \(String(format: "%.0f", r["swap_mb"] as? Double ?? 0))MB")
     out("self:      \(String(format: "%.1f", r["self_footprint_mb"] as? Double ?? 0))MB footprint")
     out("uptime:    \(fmtAge(r["uptime_s"] as? Int ?? 0))")
+case "top":
+    let r = req(["cmd": "top", "n": 12])
+    if let vm = r["vm"] as? [String: Any] {
+        let gb = { (k: String) in Double((vm[k] as? NSNumber)?.uint64Value ?? 0) / 1_073_741_824 }
+        out(String(format: "memory used %.1f / %.0f GB  (app %.1f + wired %.1f + compressed %.1f)",
+                   gb("used"), gb("physical"), gb("app"), gb("wired"), gb("compressed")))
+        out(String(format: "cached files %.1f GB (reclaimable on demand) · swap %.0f MB",
+                   gb("cached"), vm["swap_mb"] as? Double ?? 0))
+        out("")
+    }
+    var yours: UInt64 = 0
+    for g in (r["groups"] as? [[String: Any]]) ?? [] {
+        let bytes = (g["bytes"] as? NSNumber)?.uint64Value ?? 0
+        yours += bytes
+        out(String(format: "%9@  %@ ×%d", fmtBytes(bytes) as NSString, g["sig"] as? String ?? "?", g["count"] as? Int ?? 0))
+    }
+    let otherB = (r["other_bytes"] as? NSNumber)?.uint64Value ?? 0
+    yours += otherB
+    out(String(format: "%9@  %d smaller processes", fmtBytes(otherB) as NSString, r["other_count"] as? Int ?? 0))
+    if let vm = r["vm"] as? [String: Any] {
+        let app = (vm["app"] as? NSNumber)?.uint64Value ?? 0
+        out(String(format: "%9@  system + other users (app memory minus yours)", fmtBytes(app > yours ? app - yours : 0) as NSString))
+    }
 case "flags":
     let r = req(["cmd": "flags"])
     guard let flags = r["flags"] as? [[String: Any]], !flags.isEmpty else { out("no pending flags"); exit(0) }
