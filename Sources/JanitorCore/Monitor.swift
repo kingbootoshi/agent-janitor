@@ -9,9 +9,8 @@ public final class Monitor {
     private let queue = DispatchQueue(label: "aj.monitor")
     private var tracked: [Int32: ProcInfo] = [:]
     private var lastSampleAt = Date.distantPast
-    private var lastLunaAt = Date.distantPast
     private var lastNotifyAt = Date.distantPast
-    private var lastPruneAt = Date()
+    private var lastPruneAt = Date.distantPast
     private var bigNotified: Set<String> = []
     private var pressureState = "normal"
     private var pressureSource: DispatchSourceMemoryPressure?
@@ -75,7 +74,7 @@ public final class Monitor {
                 tracked[pid] = nil
             }
             let exe = Probe.path(pid)
-            let argv = Probe.argv(pid)
+            let argv = Redact.argv(Probe.argv(pid))
             let cwd = Probe.cwd(pid)
             let info = ProcInfo(
                 key: raw.key, ppid: raw.ppid, pgid: raw.pgid, uid: raw.uid,
@@ -86,13 +85,16 @@ public final class Monitor {
                 birthPpid: raw.ppid, reparentedAt: raw.ppid == 1 ? Date.distantPast : nil,
                 firstSeen: Date(), footprint: 0, resident: 0, cpuNs: 0, diskR: 0, diskW: 0)
             tracked[pid] = info
-            store.upsertProcess(info)
+            store.upsertProcess(info, birthParentKey: tracked[raw.ppid]?.key.id ?? "")
         }
 
         for (pid, info) in tracked where !seen.contains(pid) {
             store.markExited(info.key.id)
             tracked[pid] = nil
-            log.emit("exited", ["key": info.key.id, "sig": info.signature])
+            bigNotified.remove(info.key.id)
+            if isCandidateClass(info.signature) {
+                log.emit("exited", ["key": info.key.id, "sig": info.signature])
+            }
         }
 
         if Date().timeIntervalSince(lastSampleAt) >= Double(config.sampleIntervalSeconds) {
@@ -126,7 +128,6 @@ public final class Monitor {
                               selfFootprint: selfRu?.footprint ?? 0, tracked: tracked.count)
 
         if flaggedNew { maybeNotifyPending() }
-        maybeRunLuna()
     }
 
     private func isCandidateClass(_ sig: String) -> Bool {
@@ -200,7 +201,8 @@ public final class Monitor {
             }
         }
 
-        if let d = store.sampleDeltas(keyId, windowSeconds: 900),
+        if ru.footprint >= 268_435_456,
+           let d = store.sampleDeltas(keyId, windowSeconds: 900),
            Double(d.growth) / 1_048_576.0 >= config.growthMiBPer15Min {
             raiseFlag(info, rule: "rapidGrowth",
                       reason: "grew \(d.growth / 1_048_576)MiB in 15m to \(String(format: "%.2f", gib))GiB",
@@ -237,8 +239,15 @@ public final class Monitor {
         let detail = gates.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " ")
 
         if config.mode == "enforce" && pass {
-            let result = kill(keyId: keyId, force: false, by: "automatic")
-            log.emit("auto_reap", ["key": keyId, "result": result, "gates": detail])
+            if let refusal = signalKill(keyId: keyId, by: "automatic") {
+                log.emit("auto_reap_refused", ["key": keyId, "reason": refusal, "gates": detail])
+            } else {
+                queue.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    guard let self else { return }
+                    let dead = self.confirmDead(keyId: keyId)
+                    self.log.emit("auto_reap", ["key": keyId, "result": dead ? "terminated" : "survived_sigterm", "gates": detail])
+                }
+            }
         } else {
             store.logDecision(keyId, decision: pass ? "would_reap" : "would_hold",
                               detail: detail, by: "audit")
@@ -262,50 +271,46 @@ public final class Monitor {
         return false
     }
 
-    public func kill(keyId: String, force: Bool, by: String) -> String {
+    public func signalKill(keyId: String, by: String) -> String? {
         guard let row = store.processRow(keyId) else { return "unknown key" }
         let pid = row.pid
         guard let raw = Probe.bsdInfo(pid), raw.key.id == keyId else {
             store.setFlagState(keyId, "gone")
-            return "identity mismatch or already exited"
+            return "already exited"
         }
         guard raw.uid == myUid else { return "refused: not our uid" }
         guard pid > 1 else { return "refused: system pid" }
-        let exe = row.exePath
+        let livePath = Probe.path(pid)
+        let exe = livePath.isEmpty ? row.exePath : livePath
         if exe.hasPrefix("/System/") || exe.hasPrefix("/usr/libexec/") || exe.hasPrefix("/sbin/") {
             return "refused: system executable"
         }
         if by == "automatic" && store.keepMatch(keyId: keyId, signature: row.signature, project: row.project) {
             return "refused: keep policy"
         }
-
         Darwin.kill(pid, SIGTERM)
         store.logDecision(keyId, decision: "sigterm", detail: row.argv, by: by)
         log.emit("sigterm", ["key": keyId, "pid": Int(pid), "by": by, "cmd": row.argv])
+        return nil
+    }
 
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline {
-            usleep(250_000)
-            guard let check = Probe.bsdInfo(pid), check.key.id == keyId else {
-                store.setFlagState(keyId, "reaped")
-                store.markExited(keyId)
-                log.emit("reaped", ["key": keyId, "by": by])
-                return "terminated"
-            }
-        }
-        if force && by != "automatic" {
-            Darwin.kill(pid, SIGKILL)
-            store.logDecision(keyId, decision: "sigkill", detail: row.argv, by: by)
-            log.emit("sigkill", ["key": keyId, "by": by])
-            usleep(300_000)
-            if Probe.bsdInfo(pid)?.key.id != keyId {
-                store.setFlagState(keyId, "reaped")
-                store.markExited(keyId)
-                return "force killed"
-            }
-            return "survived SIGKILL"
-        }
-        return "survived SIGTERM - use force for SIGKILL"
+    public func confirmDead(keyId: String) -> Bool {
+        guard let row = store.processRow(keyId) else { return true }
+        if let check = Probe.bsdInfo(row.pid), check.key.id == keyId { return false }
+        store.setFlagState(keyId, "reaped")
+        store.markExited(keyId)
+        log.emit("reaped", ["key": keyId])
+        return true
+    }
+
+    public func forceKillNow(keyId: String) -> String {
+        guard let row = store.processRow(keyId),
+              let raw = Probe.bsdInfo(row.pid), raw.key.id == keyId else { return "already exited" }
+        guard raw.uid == myUid, row.pid > 1 else { return "refused" }
+        Darwin.kill(row.pid, SIGKILL)
+        store.logDecision(keyId, decision: "sigkill", detail: row.argv, by: "user")
+        log.emit("sigkill", ["key": keyId])
+        return "sigkill sent"
     }
 
     public func keep(keyId: String, scope: String, note: String) -> String {
@@ -365,7 +370,7 @@ public final class Monitor {
                 command: String(row.argv.prefix(120)),
                 ageSeconds: Int(Date().timeIntervalSince1970 - (Double(f.keyId.split(separator: ".").dropFirst().first ?? "0") ?? row.firstSeen)),
                 footprint: ru?.footprint ?? 0,
-                reason: f.reason, lunaVerdict: f.lunaVerdict, lunaReason: f.lunaReason,
+                reason: f.reason,
                 state: "pending", firstFlagged: Date(timeIntervalSince1970: f.firstFlagged))
         }
     }
@@ -379,40 +384,12 @@ public final class Monitor {
     }
 
     private func notify(_ title: String, _ body: String, force: Bool) {
-        let script = "display notification \"\(body)\" with title \"Agent Janitor\" subtitle \"\(title)\""
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", script]
+        p.arguments = ["-e", "on run argv", "-e",
+                       "display notification (item 1 of argv) with title \"Agent Janitor\" subtitle (item 2 of argv)",
+                       "-e", "end run", body, title]
         try? p.run()
-    }
-
-    private func maybeRunLuna() {
-        guard config.lunaEnabled,
-              Luna.apiKey != nil,
-              Date().timeIntervalSince(lastLunaAt) > Double(config.lunaIntervalMinutes) * 60 else { return }
-        let flags = flagList().filter { $0.lunaVerdict == nil }
-        guard !flags.isEmpty else { return }
-        lastLunaAt = Date()
-        var evidence: [String: String] = [:]
-        for f in flags {
-            guard let info = tracked[f.pid], info.key.id == f.keyId else { continue }
-            let sock = Probe.sockets(f.pid)
-            var cpu = "unknown"
-            if let d = store.sampleDeltas(f.keyId, windowSeconds: 1800) {
-                cpu = String(format: "%.1f%%", Double(d.cpuNs) / (1800 * 1_000_000_000) * 100)
-            }
-            let parent = Probe.bsdInfo(info.key.pid)?.ppid == 1 ? "dead(launchd)" : "alive"
-            evidence[f.keyId] = "cpu30m=\(cpu) tty=\(info.ttyDev > 0 ? "yes" : "no") parent=\(parent) listeners=\(sock.listeners.count) established=\(sock.established)"
-        }
-        Luna.triage(flags: flags, evidence: evidence, model: config.lunaModel) { [weak self] verdicts in
-            guard let self else { return }
-            self.queue.async {
-                for v in verdicts {
-                    self.store.setLuna(v.keyId, verdict: v.verdict, reason: v.reason)
-                    self.log.emit("luna_verdict", ["key": v.keyId, "verdict": v.verdict, "reason": v.reason])
-                }
-            }
-        }
     }
 
     private func hrs(_ s: TimeInterval) -> String {

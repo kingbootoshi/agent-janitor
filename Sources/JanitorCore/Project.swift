@@ -6,6 +6,7 @@ public enum Project {
     public static func resolve(cwd: String) -> String {
         guard !cwd.isEmpty, cwd != "/" else { return "" }
         if let hit = cache[cwd] { return hit }
+        if cache.count >= 4096 { cache.removeAll(keepingCapacity: true) }
         var dir = URL(fileURLWithPath: cwd)
         let fm = FileManager.default
         let markers = [".git", "package.json", "pyproject.toml", "Cargo.toml", "Package.swift"]

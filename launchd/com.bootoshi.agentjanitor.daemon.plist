@@ -4,12 +4,8 @@
 <dict>
     <key>Label</key>
     <string>com.bootoshi.agentjanitor.daemon</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/sh</string>
-        <string>-c</string>
-        <string>SV="$HOME/.local/bin/sv"; BIN="$HOME/.local/bin/janitord"; if [ -x "$SV" ] &amp;&amp; "$SV" ls 2>/dev/null | grep -qx OPENROUTER_API_KEY; then exec "$SV" run OPENROUTER_API_KEY -- "$BIN"; else exec "$BIN"; fi</string>
-    </array>
+    <key>Program</key>
+    <string>__HOME__/.local/bin/janitord</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -21,6 +17,6 @@
     <key>Nice</key>
     <integer>10</integer>
     <key>StandardErrorPath</key>
-    <string>/tmp/agentjanitor.daemon.err</string>
+    <string>__HOME__/Library/Logs/agentjanitor.daemon.log</string>
 </dict>
 </plist>

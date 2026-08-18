@@ -38,7 +38,7 @@ public final class Store {
         CREATE TABLE IF NOT EXISTS flag (
             key_id TEXT PRIMARY KEY,
             rule TEXT, reason TEXT, state TEXT,
-            first_flagged REAL, luna_verdict TEXT, luna_reason TEXT, resolved_at REAL
+            first_flagged REAL, resolved_at REAL
         );
         CREATE TABLE IF NOT EXISTS policy (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,7 +97,7 @@ public final class Store {
         return String(cString: c)
     }
 
-    public func upsertProcess(_ p: ProcInfo) {
+    public func upsertProcess(_ p: ProcInfo, birthParentKey: String) {
         run("""
         INSERT INTO process_instance
         (key_id,pid,start_sec,start_usec,uid,exe_path,argv,cwd,project,signature,birth_ppid,birth_parent_key,pgid,tty_dev,first_seen,last_seen)
@@ -105,7 +105,7 @@ public final class Store {
         ON CONFLICT(key_id) DO UPDATE SET last_seen=excluded.last_seen
         """, [p.key.id, p.key.pid, p.key.startSec, p.key.startUsec, p.uid, p.exePath,
               p.argv.joined(separator: "\u{1f}"), p.cwd, p.project, p.signature,
-              p.birthPpid, "", p.pgid, p.ttyDev, p.firstSeen, Date()])
+              p.birthPpid, birthParentKey, p.pgid, p.ttyDev, p.firstSeen, Date()])
     }
 
     public func markReparented(_ key: ProcessKey) {
@@ -153,16 +153,10 @@ public final class Store {
         run("UPDATE flag SET state=?, resolved_at=? WHERE key_id=?", [state, Date(), keyId])
     }
 
-    public func setLuna(_ keyId: String, verdict: String, reason: String) {
-        run("UPDATE flag SET luna_verdict=?, luna_reason=? WHERE key_id=?", [verdict, reason, keyId])
-    }
-
-    public func pendingFlags() -> [(keyId: String, rule: String, reason: String, firstFlagged: Double, lunaVerdict: String?, lunaReason: String?)] {
-        var out: [(String, String, String, Double, String?, String?)] = []
-        query("SELECT key_id,rule,reason,first_flagged,luna_verdict,luna_reason FROM flag WHERE state='pending' ORDER BY first_flagged") { s in
-            let lv = sqlite3_column_text(s, 4).map { String(cString: $0) }
-            let lr = sqlite3_column_text(s, 5).map { String(cString: $0) }
-            out.append((self.text(s, 0), self.text(s, 1), self.text(s, 2), sqlite3_column_double(s, 3), lv, lr))
+    public func pendingFlags() -> [(keyId: String, rule: String, reason: String, firstFlagged: Double)] {
+        var out: [(String, String, String, Double)] = []
+        query("SELECT key_id,rule,reason,first_flagged FROM flag WHERE state='pending' ORDER BY first_flagged") { s in
+            out.append((self.text(s, 0), self.text(s, 1), self.text(s, 2), sqlite3_column_double(s, 3)))
         }
         return out
     }
@@ -192,12 +186,13 @@ public final class Store {
             [Date(), keyId, decision, detail, by])
     }
 
+    private static let iso = ISO8601DateFormatter()
+
     public func recentDecisions(_ n: Int) -> [String] {
         var out: [String] = []
         query("SELECT ts,key_id,decision,detail,initiated_by FROM decision_log ORDER BY ts DESC LIMIT ?", [n]) { s in
             let ts = Date(timeIntervalSince1970: sqlite3_column_double(s, 0))
-            let f = ISO8601DateFormatter()
-            out.append("\(f.string(from: ts)) [\(self.text(s, 4))] \(self.text(s, 2)) \(self.text(s, 1)) \(self.text(s, 3))")
+            out.append("\(Self.iso.string(from: ts)) [\(self.text(s, 4))] \(self.text(s, 2)) \(self.text(s, 1)) \(self.text(s, 3))")
         }
         return out
     }

@@ -35,7 +35,14 @@ public final class SocketServer {
     private func acceptLoop() {
         while fd >= 0 {
             let client = accept(fd, nil, nil)
-            guard client >= 0 else { continue }
+            guard client >= 0 else {
+                if errno == EBADF { break }
+                usleep(200_000)
+                continue
+            }
+            var tv = timeval(tv_sec: 5, tv_usec: 0)
+            setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
             acceptQueue.async { [weak self] in
                 self?.handle(client)
                 close(client)
@@ -51,8 +58,14 @@ public final class SocketServer {
               let cmd = obj["cmd"] as? String else { return }
 
         let reply = dispatch(cmd, obj)
-        if let data = try? JSONSerialization.data(withJSONObject: reply) {
-            data.withUnsafeBytes { _ = write(client, $0.baseAddress, $0.count) }
+        guard let data = try? JSONSerialization.data(withJSONObject: reply) else { return }
+        data.withUnsafeBytes { raw in
+            var off = 0
+            while off < raw.count {
+                let w = write(client, raw.baseAddress! + off, raw.count - off)
+                if w <= 0 { break }
+                off += w
+            }
         }
     }
 
@@ -91,8 +104,23 @@ public final class SocketServer {
         case "kill":
             guard let keyId = obj["key"] as? String else { return ["ok": false, "error": "key required"] }
             let force = obj["force"] as? Bool ?? false
-            let result = monitor.sync { $0.kill(keyId: keyId, force: force, by: "user") }
-            return ["ok": true, "result": result]
+            if let refusal = monitor.sync({ $0.signalKill(keyId: keyId, by: "user") }) {
+                return ["ok": true, "result": refusal]
+            }
+            let deadline = Date().addingTimeInterval(3)
+            while Date() < deadline {
+                usleep(200_000)
+                if monitor.sync({ $0.confirmDead(keyId: keyId) }) {
+                    return ["ok": true, "result": "terminated"]
+                }
+            }
+            if force {
+                let r = monitor.sync { $0.forceKillNow(keyId: keyId) }
+                usleep(400_000)
+                let dead = monitor.sync { $0.confirmDead(keyId: keyId) }
+                return ["ok": true, "result": dead ? "force killed" : r]
+            }
+            return ["ok": true, "result": "sigterm sent - still shutting down, recheck flags"]
         case "dismiss":
             guard let keyId = obj["key"] as? String else { return ["ok": false, "error": "key required"] }
             monitor.sync { $0.store.setFlagState(keyId, "dismissed") }
@@ -132,6 +160,9 @@ public enum SocketClient {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
+        var tv = timeval(tv_sec: 10, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         Paths.socket.path.withCString { cs in

@@ -6,6 +6,6 @@ let monitor = Monitor()
 let server = SocketServer(monitor: monitor)
 monitor.start()
 server.start()
-signal(SIGTERM) { _ in exit(0) }
-signal(SIGINT) { _ in exit(0) }
+signal(SIGTERM) { _ in _exit(0) }
+signal(SIGINT) { _ in _exit(0) }
 dispatchMain()

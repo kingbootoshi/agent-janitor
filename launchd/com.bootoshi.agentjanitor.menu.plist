@@ -16,6 +16,6 @@
     <key>LimitLoadToSessionType</key>
     <string>Aqua</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/agentjanitor.menu.err</string>
+    <string>__HOME__/Library/Logs/agentjanitor.menu.log</string>
 </dict>
 </plist>

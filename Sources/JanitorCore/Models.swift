@@ -52,10 +52,49 @@ public struct FlagRecord: Codable, Sendable {
     public var ageSeconds: Int
     public var footprint: UInt64
     public var reason: String
-    public var lunaVerdict: String?
-    public var lunaReason: String?
     public var state: String
     public var firstFlagged: Date
+}
+
+public enum Redact {
+    private static let secretPrefixes = ["sk-", "ghp_", "gho_", "github_pat_", "xox", "eyJ", "AKIA", "pk_live", "rk_live", "whsec_"]
+
+    private static func flagIsSensitive(_ s: String) -> Bool {
+        let lower = s.lowercased()
+        return ["key", "token", "secret", "passw", "auth", "bearer", "credential"].contains { lower.contains($0) }
+    }
+
+    private static func looksSecret(_ s: String) -> Bool {
+        if secretPrefixes.contains(where: { s.hasPrefix($0) }) { return true }
+        return s.count > 40 && !s.contains("/") && !s.contains(" ")
+            && s.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == "+" || $0 == "=" }
+    }
+
+    public static func argv(_ args: [String]) -> [String] {
+        var out: [String] = []
+        var redactNext = false
+        for arg in args {
+            if redactNext {
+                out.append("***")
+                redactNext = false
+                continue
+            }
+            var v = arg
+            if let eq = v.firstIndex(of: "="), flagIsSensitive(String(v[..<eq])) {
+                v = String(v[..<eq]) + "=***"
+            } else if v.hasPrefix("-") && flagIsSensitive(v) {
+                redactNext = true
+            } else if looksSecret(v) {
+                v = "***"
+            } else if let scheme = v.range(of: "://"),
+                      let at = v.range(of: "@", range: scheme.upperBound..<v.endIndex),
+                      let colon = v.range(of: ":", range: scheme.upperBound..<at.lowerBound) {
+                v.replaceSubrange(colon.upperBound..<at.lowerBound, with: "***")
+            }
+            out.append(v)
+        }
+        return out
+    }
 }
 
 public struct SummaryReply: Codable, Sendable {
@@ -109,6 +148,7 @@ public enum Paths {
     public static func ensure() {
         try? FileManager.default.createDirectory(at: supportDir, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: supportDir.path)
     }
 }
 
@@ -123,9 +163,6 @@ public struct Config: Codable, Sendable {
     public var httpServerMinAgeHours: Int
     public var agentStaleHours: Int
     public var sshOneShotMaxHours: Int
-    public var lunaEnabled: Bool
-    public var lunaModel: String
-    public var lunaIntervalMinutes: Int
     public var notifyCooldownMinutes: Int
 
     public static let defaults = Config(
@@ -139,9 +176,6 @@ public struct Config: Codable, Sendable {
         httpServerMinAgeHours: 4,
         agentStaleHours: 24,
         sshOneShotMaxHours: 6,
-        lunaEnabled: true,
-        lunaModel: "openai/gpt-5.6-luna",
-        lunaIntervalMinutes: 15,
         notifyCooldownMinutes: 30
     )
 
@@ -160,5 +194,6 @@ public struct Config: Codable, Sendable {
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         Paths.ensure()
         try? enc.encode(self).write(to: Paths.config)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Paths.config.path)
     }
 }

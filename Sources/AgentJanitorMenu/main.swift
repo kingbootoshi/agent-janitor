@@ -76,50 +76,6 @@ final class MenuController: NSObject, NSMenuDelegate {
         return img
     }
 
-    static func booIcon(alert: Bool) -> NSImage {
-        let size = NSSize(width: 18, height: 18)
-        let img = NSImage(size: size, flipped: false) { _ in
-            let body = NSBezierPath()
-            body.move(to: NSPoint(x: 2.2, y: 3.6))
-            body.line(to: NSPoint(x: 2.2, y: 9.5))
-            body.appendArc(withCenter: NSPoint(x: 9, y: 9.5), radius: 6.8,
-                           startAngle: 180, endAngle: 0, clockwise: true)
-            body.line(to: NSPoint(x: 15.8, y: 3.6))
-            body.curve(to: NSPoint(x: 13.5, y: 3.6),
-                       controlPoint1: NSPoint(x: 15.0, y: 1.7), controlPoint2: NSPoint(x: 14.3, y: 1.7))
-            body.curve(to: NSPoint(x: 11.25, y: 3.6),
-                       controlPoint1: NSPoint(x: 12.75, y: 5.4), controlPoint2: NSPoint(x: 12.0, y: 5.4))
-            body.curve(to: NSPoint(x: 9, y: 3.6),
-                       controlPoint1: NSPoint(x: 10.5, y: 1.7), controlPoint2: NSPoint(x: 9.75, y: 1.7))
-            body.curve(to: NSPoint(x: 6.75, y: 3.6),
-                       controlPoint1: NSPoint(x: 8.25, y: 5.4), controlPoint2: NSPoint(x: 7.5, y: 5.4))
-            body.curve(to: NSPoint(x: 4.5, y: 3.6),
-                       controlPoint1: NSPoint(x: 6.0, y: 1.7), controlPoint2: NSPoint(x: 5.25, y: 1.7))
-            body.curve(to: NSPoint(x: 2.2, y: 3.6),
-                       controlPoint1: NSPoint(x: 3.75, y: 5.4), controlPoint2: NSPoint(x: 3.0, y: 5.4))
-            body.close()
-            NSColor.black.setFill()
-            body.fill()
-
-            NSGraphicsContext.current?.compositingOperation = .destinationOut
-            let leftEye = NSBezierPath(ovalIn: NSRect(x: 5.4, y: 8.3, width: 2.4, height: alert ? 3.4 : 2.4))
-            let rightEye = NSBezierPath(ovalIn: NSRect(x: 10.2, y: 8.3, width: 2.4, height: alert ? 3.4 : 2.4))
-            leftEye.fill()
-            rightEye.fill()
-            if !alert {
-                let mouth = NSBezierPath()
-                mouth.move(to: NSPoint(x: 7.2, y: 6.4))
-                mouth.appendArc(withCenter: NSPoint(x: 9, y: 6.4), radius: 1.8,
-                                startAngle: 180, endAngle: 360, clockwise: false)
-                mouth.lineWidth = 1.1
-                mouth.stroke()
-            }
-            return true
-        }
-        img.isTemplate = true
-        return img
-    }
-
     struct Row {
         var keyId: String
         var signature: String
@@ -129,8 +85,6 @@ final class MenuController: NSObject, NSMenuDelegate {
         var footprint: UInt64
         var reason: String
         var command: String
-        var lunaVerdict: String?
-        var lunaReason: String?
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -146,9 +100,7 @@ final class MenuController: NSObject, NSMenuDelegate {
                 age: f["ageSeconds"] as? Int ?? 0,
                 footprint: (f["footprint"] as? NSNumber)?.uint64Value ?? 0,
                 reason: f["reason"] as? String ?? "",
-                command: f["command"] as? String ?? "",
-                lunaVerdict: f["lunaVerdict"] as? String,
-                lunaReason: f["lunaReason"] as? String)
+                command: f["command"] as? String ?? "")
         }
 
         let top = daemonRequest(["cmd": "top", "n": 8])
@@ -168,8 +120,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         var groups: [String: [Row]] = [:]
         for r in rows { groups[r.signature + "|" + r.project, default: []].append(r) }
         let ordered = groups.values.sorted {
-            $0.reduce(0) { $1.footprint > 100_000_000 ? $0 + $1.footprint : $0 + $1.footprint } >
-            $1.reduce(0) { $1.footprint > 100_000_000 ? $0 + $1.footprint : $0 + $1.footprint }
+            $0.reduce(UInt64(0)) { $0 + $1.footprint } > $1.reduce(UInt64(0)) { $0 + $1.footprint }
         }
 
         for group in ordered {
@@ -179,7 +130,7 @@ final class MenuController: NSObject, NSMenuDelegate {
                 let total = group.reduce(UInt64(0)) { $0 + $1.footprint }
                 let ages = group.map(\.age)
                 let first = group[0]
-                let title = "\(glyph(group)) \(group.count)× \(first.signature)\(first.project.isEmpty ? "" : " · \(first.project)") · \(fmtAge(ages.min() ?? 0))-\(fmtAge(ages.max() ?? 0)) · \(fmtBytes(total))"
+                let title = "\(group.count)× \(first.signature)\(first.project.isEmpty ? "" : " · \(first.project)") · \(fmtAge(ages.min() ?? 0))-\(fmtAge(ages.max() ?? 0)) · \(fmtBytes(total))"
                 let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
                 let sub = NSMenu()
                 let keys = group.map(\.keyId)
@@ -235,24 +186,13 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(quit)
     }
 
-    private func glyph(_ group: [Row]) -> String {
-        let verdicts = Set(group.compactMap(\.lunaVerdict))
-        if verdicts == ["dead"] { return "✕" }
-        if verdicts == ["active"] { return "●" }
-        if verdicts.isEmpty { return "•" }
-        return "?"
-    }
-
     private func flagItem(_ r: Row, compact: Bool = false) -> NSMenuItem {
         let title = compact
             ? "pid \(r.keyId.split(separator: ".").first.map(String.init) ?? "?") · \(fmtAge(r.age)) · \(fmtBytes(r.footprint))"
-            : "\(glyph([r])) \(r.signature)\(r.project.isEmpty ? "" : " · \(r.project)") · \(fmtAge(r.age)) · \(fmtBytes(r.footprint))"
+            : "\(r.signature)\(r.project.isEmpty ? "" : " · \(r.project)") · \(fmtAge(r.age)) · \(fmtBytes(r.footprint))"
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         let sub = NSMenu()
         for line in wrap(r.reason, 46) { addInfo(sub, line) }
-        if let lv = r.lunaVerdict {
-            for line in wrap("luna \(lv): \(r.lunaReason ?? "")", 46) { addInfo(sub, line) }
-        }
         addInfo(sub, "…" + String(r.command.suffix(44)))
         sub.addItem(.separator())
         sub.addItem(single("Keep this instance", #selector(keepInstance(_:)), r.keyId))
@@ -335,9 +275,15 @@ final class MenuController: NSObject, NSMenuDelegate {
 
     @objc func keepMany(_ sender: NSMenuItem) { keepProject(sender) }
 
+    private func killAsync(_ list: [String], force: Bool) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            for k in list { _ = self?.daemonRequest(["cmd": "kill", "key": k, "force": force]) }
+            self?.refreshIcon()
+        }
+    }
+
     @objc func killOne(_ sender: NSMenuItem) {
-        for k in keys(sender) { _ = daemonRequest(["cmd": "kill", "key": k, "force": false]) }
-        refreshIcon()
+        killAsync(keys(sender), force: false)
     }
 
     @objc func killMany(_ sender: NSMenuItem) {
@@ -348,8 +294,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         alert.addButton(withTitle: "Terminate All")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        for k in list { _ = daemonRequest(["cmd": "kill", "key": k, "force": false]) }
-        refreshIcon()
+        killAsync(list, force: false)
     }
 
     @objc func forceKill(_ sender: NSMenuItem) {
@@ -359,8 +304,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         alert.addButton(withTitle: "SIGKILL")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        for k in keys(sender) { _ = daemonRequest(["cmd": "kill", "key": k, "force": true]) }
-        refreshIcon()
+        killAsync(keys(sender), force: true)
     }
 
     @objc func dismissOne(_ sender: NSMenuItem) {

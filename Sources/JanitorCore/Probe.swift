@@ -24,13 +24,33 @@ public struct RusageFact {
 
 public enum Probe {
     public static func allPids() -> [Int32] {
-        var buf = [Int32](repeating: 0, count: 8192)
-        let bytes = buf.withUnsafeMutableBufferPointer { p in
-            aj_list_pids(p.baseAddress, Int32(p.count * MemoryLayout<Int32>.size))
+        var cap = 8192
+        while cap <= 262_144 {
+            var buf = [Int32](repeating: 0, count: cap)
+            let bytes = buf.withUnsafeMutableBufferPointer { p in
+                aj_list_pids(p.baseAddress, Int32(p.count * MemoryLayout<Int32>.size))
+            }
+            guard bytes > 0 else { return [] }
+            let n = Int(bytes) / MemoryLayout<Int32>.size
+            if n < cap { return Array(buf.prefix(n)).filter { $0 > 0 } }
+            cap *= 2
         }
-        guard bytes > 0 else { return [] }
-        let n = Int(bytes) / MemoryLayout<Int32>.size
-        return Array(buf.prefix(n)).filter { $0 > 0 }
+        return []
+    }
+
+    private static func fdList(_ pid: Int32) -> [proc_fdinfo] {
+        var cap = 128
+        while cap <= 65_536 {
+            var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: cap)
+            let got = fds.withUnsafeMutableBufferPointer { p in
+                aj_fds(pid, p.baseAddress, Int32(p.count * MemoryLayout<proc_fdinfo>.size))
+            }
+            guard got > 0 else { return [] }
+            let n = Int(got) / MemoryLayout<proc_fdinfo>.size
+            if n < cap { return Array(fds.prefix(n)) }
+            cap *= 2
+        }
+        return []
     }
 
     public static func bsdInfo(_ pid: Int32) -> RawProc? {
@@ -118,18 +138,9 @@ public enum Probe {
 
     public static func sockets(_ pid: Int32) -> SocketFact {
         var fact = SocketFact(listeners: [], loopbackOnly: true, established: 0)
-        let fdBytes = aj_fds(pid, nil, 0)
-        guard fdBytes > 0 else { return fact }
-        let count = Int(fdBytes) / MemoryLayout<proc_fdinfo>.size
-        var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: count + 16)
-        let got = fds.withUnsafeMutableBufferPointer { p in
-            aj_fds(pid, p.baseAddress, Int32(p.count * MemoryLayout<proc_fdinfo>.size))
-        }
-        guard got > 0 else { return fact }
-        let n = Int(got) / MemoryLayout<proc_fdinfo>.size
-        for i in 0..<n where fds[i].proc_fdtype == UInt32(PROX_FDTYPE_SOCKET) {
+        for fd in fdList(pid) where fd.proc_fdtype == UInt32(PROX_FDTYPE_SOCKET) {
             var si = socket_fdinfo()
-            guard aj_socket(pid, fds[i].proc_fd, &si) == MemoryLayout<socket_fdinfo>.size else { continue }
+            guard aj_socket(pid, fd.proc_fd, &si) == MemoryLayout<socket_fdinfo>.size else { continue }
             guard si.psi.soi_kind == Int32(SOCKINFO_TCP) else { continue }
             let tcp = si.psi.soi_proto.pri_tcp
             let state = tcp.tcpsi_state
@@ -158,19 +169,10 @@ public enum Probe {
     }
 
     public static func pipePeerHandles(_ pid: Int32) -> [UInt64] {
-        let fdBytes = aj_fds(pid, nil, 0)
-        guard fdBytes > 0 else { return [] }
-        let count = Int(fdBytes) / MemoryLayout<proc_fdinfo>.size
-        var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: count + 16)
-        let got = fds.withUnsafeMutableBufferPointer { p in
-            aj_fds(pid, p.baseAddress, Int32(p.count * MemoryLayout<proc_fdinfo>.size))
-        }
-        guard got > 0 else { return [] }
-        let n = Int(got) / MemoryLayout<proc_fdinfo>.size
         var handles: [UInt64] = []
-        for i in 0..<n where fds[i].proc_fdtype == UInt32(PROX_FDTYPE_PIPE) {
+        for fd in fdList(pid) where fd.proc_fdtype == UInt32(PROX_FDTYPE_PIPE) {
             var pi = pipe_fdinfo()
-            guard aj_pipe(pid, fds[i].proc_fd, &pi) == MemoryLayout<pipe_fdinfo>.size else { continue }
+            guard aj_pipe(pid, fd.proc_fd, &pi) == MemoryLayout<pipe_fdinfo>.size else { continue }
             if pi.pipeinfo.pipe_peerhandle != 0 { handles.append(pi.pipeinfo.pipe_peerhandle) }
             if pi.pipeinfo.pipe_handle != 0 { handles.append(pi.pipeinfo.pipe_handle) }
         }

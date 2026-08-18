@@ -4,7 +4,14 @@ import JanitorCore
 let args = CommandLine.arguments
 let cmd = args.count > 1 ? args[1] : "status"
 
-func out(_ s: String) { print(s) }
+func out(_ s: String) {
+    let clean = s.unicodeScalars.map { scalar -> Character in
+        if scalar == "\n" || scalar == "\t" { return Character(scalar) }
+        if scalar.value < 32 || scalar.value == 127 { return "?" }
+        return Character(scalar)
+    }
+    print(String(clean))
+}
 
 func fail(_ s: String) -> Never {
     FileHandle.standardError.write(Data((s + "\n").utf8))
@@ -69,7 +76,6 @@ case "flags":
         out("  \(f["command"] ?? "")")
         out("  \(f["project"] ?? "-") · \(fmtAge((f["ageSeconds"] as? Int) ?? 0)) · \(fmtBytes(fp))")
         out("  \(f["reason"] ?? "")")
-        if let v = f["lunaVerdict"] as? String { out("  luna: \(v) - \(f["lunaReason"] as? String ?? "")") }
         out("")
     }
 case "keep":
