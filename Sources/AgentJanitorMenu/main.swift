@@ -151,37 +151,15 @@ final class MenuController: NSObject, NSMenuDelegate {
                 lunaReason: f["lunaReason"] as? String)
         }
 
-        if let s = summary {
-            let selfMB = String(format: "%.0f", s["self_footprint_mb"] as? Double ?? 0)
-            addInfo(menu, "\(s["mode"] ?? "?") mode · \(s["tracked"] ?? 0) tracked · janitor \(selfMB)MB · pressure \(s["pressure"] ?? "?")")
-        } else {
+        let top = daemonRequest(["cmd": "top", "n": 8])
+        if let vm = top?["vm"] as? [String: Any] {
+            let gb = { (k: String) in Double((vm[k] as? NSNumber)?.uint64Value ?? 0) / 1_073_741_824 }
+            let pressure = summary?["pressure"] as? String ?? "?"
+            addMono(menu, String(format: "%.1f / %.0f GB · pressure %@", gb("used"), gb("physical"), pressure as NSString))
+        } else if summary == nil {
             addInfo(menu, "daemon unreachable")
         }
         menu.addItem(.separator())
-
-        if let top = daemonRequest(["cmd": "top", "n": 8]), let vm = top["vm"] as? [String: Any] {
-            let gb = { (k: String) in Double((vm[k] as? NSNumber)?.uint64Value ?? 0) / 1_073_741_824 }
-            addMono(menu, String(format: "memory used  %5.1f / %.0f GB", gb("used"), gb("physical")))
-            addMono(menu, String(format: "app %.1f · wired %.1f · compressed %.1f", gb("app"), gb("wired"), gb("compressed")))
-            addMono(menu, String(format: "cached files %.1f (frees itself)", gb("cached")))
-            menu.addItem(.separator())
-            let groups = top["groups"] as? [[String: Any]] ?? []
-            var yoursTotal: UInt64 = 0
-            for g in groups {
-                let bytes = (g["bytes"] as? NSNumber)?.uint64Value ?? 0
-                yoursTotal += bytes
-                let count = g["count"] as? Int ?? 0
-                let sig = String((g["sig"] as? String ?? "?").prefix(22))
-                addMono(menu, String(format: "%7@  %@%@", fmtBytes(bytes) as NSString, sig, count > 1 ? " ×\(count)" : ""))
-            }
-            let otherBytes = (top["other_bytes"] as? NSNumber)?.uint64Value ?? 0
-            let otherCount = top["other_count"] as? Int ?? 0
-            yoursTotal += otherBytes
-            addMono(menu, String(format: "%7@  %d smaller processes", fmtBytes(otherBytes) as NSString, otherCount))
-            let systemBytes = max(0, Int64((vm["app"] as? NSNumber)?.int64Value ?? 0) - Int64(yoursTotal))
-            addMono(menu, String(format: "%7@  system + other users", fmtBytes(UInt64(systemBytes)) as NSString))
-            menu.addItem(.separator())
-        }
 
         if rows.isEmpty {
             addInfo(menu, "all clean - nothing flagged")
@@ -218,6 +196,37 @@ final class MenuController: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+
+        if let top, let vm = top["vm"] as? [String: Any] {
+            let breakdown = NSMenuItem(title: "Memory Breakdown", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            sub.autoenablesItems = false
+            let gb = { (k: String) in Double((vm[k] as? NSNumber)?.uint64Value ?? 0) / 1_073_741_824 }
+            addMono(sub, String(format: "app %.1f + wired %.1f + compressed %.1f", gb("app"), gb("wired"), gb("compressed")))
+            addMono(sub, String(format: "cached files %.1f (frees itself)", gb("cached")))
+            sub.addItem(.separator())
+            var yoursTotal: UInt64 = 0
+            for g in (top["groups"] as? [[String: Any]] ?? []) {
+                let bytes = (g["bytes"] as? NSNumber)?.uint64Value ?? 0
+                yoursTotal += bytes
+                let count = g["count"] as? Int ?? 0
+                let sig = String((g["sig"] as? String ?? "?").prefix(22))
+                addMono(sub, String(format: "%7@  %@%@", fmtBytes(bytes) as NSString, sig, count > 1 ? " ×\(count)" : ""))
+            }
+            let otherBytes = (top["other_bytes"] as? NSNumber)?.uint64Value ?? 0
+            yoursTotal += otherBytes
+            addMono(sub, String(format: "%7@  %d smaller processes", fmtBytes(otherBytes) as NSString, top["other_count"] as? Int ?? 0))
+            let systemBytes = max(0, Int64((vm["app"] as? NSNumber)?.int64Value ?? 0) - Int64(yoursTotal))
+            addMono(sub, String(format: "%7@  system + other users", fmtBytes(UInt64(systemBytes)) as NSString))
+            if let s = summary {
+                sub.addItem(.separator())
+                let selfMB = String(format: "%.0f", s["self_footprint_mb"] as? Double ?? 0)
+                addMono(sub, "\(s["mode"] ?? "?") mode · \(s["tracked"] ?? 0) tracked · janitor \(selfMB)MB")
+            }
+            breakdown.submenu = sub
+            menu.addItem(breakdown)
+        }
+
         let modeToggle = NSMenuItem(title: (summary?["mode"] as? String == "audit") ? "Enable enforce mode" : "Switch to audit mode",
                                     action: #selector(toggleMode(_:)), keyEquivalent: "")
         modeToggle.target = self
@@ -267,7 +276,7 @@ final class MenuController: NSObject, NSMenuDelegate {
             .font: NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .regular),
             .foregroundColor: NSColor.labelColor
         ])
-        item.isEnabled = true
+        item.isEnabled = false
         menu.addItem(item)
     }
 
