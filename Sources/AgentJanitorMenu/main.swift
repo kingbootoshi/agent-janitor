@@ -103,7 +103,10 @@ final class MenuController: NSObject, NSMenuDelegate {
                 command: f["command"] as? String ?? "")
         }
 
-        let top = daemonRequest(["cmd": "top", "n": 8])
+        // Fall back to plain "top" against an older daemon (menu can outlive the
+        // daemon across updates); rows render without drill-down in that case.
+        var top = daemonRequest(["cmd": "top_detail", "n": 8])
+        if top?["groups"] == nil { top = daemonRequest(["cmd": "top", "n": 8]) }
         if let vm = top?["vm"] as? [String: Any] {
             let gb = { (k: String) in Double((vm[k] as? NSNumber)?.uint64Value ?? 0) / 1_073_741_824 }
             let pressure = summary?["pressure"] as? String ?? "?"
@@ -162,7 +165,24 @@ final class MenuController: NSObject, NSMenuDelegate {
                 yoursTotal += bytes
                 let count = g["count"] as? Int ?? 0
                 let sig = String((g["sig"] as? String ?? "?").prefix(22))
-                addMono(sub, String(format: "%7@  %@%@", fmtBytes(bytes) as NSString, sig, count > 1 ? " ×\(count)" : ""))
+                let members = g["members"] as? [[String: Any]] ?? []
+                let ages = members.compactMap { $0["age_s"] as? Int }
+                var ageSpan = ""
+                if let lo = ages.min(), let hi = ages.max() {
+                    ageSpan = fmtAge(lo) == fmtAge(hi) ? " · \(fmtAge(hi))" : " · \(fmtAge(lo))–\(fmtAge(hi))"
+                }
+                let title = String(format: "%7@  %@%@%@", fmtBytes(bytes) as NSString, sig, count > 1 ? " ×\(count)" : "", ageSpan)
+                let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+                item.attributedTitle = NSAttributedString(string: title, attributes: [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .regular),
+                    .foregroundColor: NSColor.labelColor
+                ])
+                if members.isEmpty {
+                    item.isEnabled = false
+                } else {
+                    item.submenu = membersMenu(members)
+                }
+                sub.addItem(item)
             }
             let otherBytes = (top["other_bytes"] as? NSNumber)?.uint64Value ?? 0
             yoursTotal += otherBytes
@@ -184,6 +204,51 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(modeToggle)
         let quit = NSMenuItem(title: "Quit Menu (daemon keeps running)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
+    }
+
+    // Per-process drill-down for a Memory Breakdown group. Members arrive sorted by
+    // footprint desc; everything under 10MiB collapses into one summary line unless
+    // the whole group is small, in which case the top 5 stay actionable.
+    private func membersMenu(_ members: [[String: Any]]) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let bytesOf = { (m: [String: Any]) in (m["bytes"] as? NSNumber)?.uint64Value ?? 0 }
+        if members.count > 1 {
+            let allKeys = members.compactMap { $0["key"] as? String }
+            let total = members.reduce(UInt64(0)) { $0 + bytesOf($1) }
+            menu.addItem(bulk("Terminate all \(members.count) · \(fmtBytes(total))", #selector(killMany(_:)), allKeys))
+            menu.addItem(.separator())
+        }
+        // Sort locally rather than trusting daemon order: the "… N smaller" split
+        // below is positional, so it must not depend on a cross-process invariant.
+        let ordered = members.sorted { bytesOf($0) > bytesOf($1) }
+        var shown = ordered.prefix { bytesOf($0) >= 10 * 1_048_576 }
+        if shown.isEmpty { shown = ordered.prefix(5) }
+        if shown.count > 20 { shown = ordered.prefix(20) }
+        for m in shown {
+            let pid = (m["pid"] as? NSNumber)?.intValue ?? 0
+            let age = m["age_s"] as? Int ?? 0
+            let project = m["project"] as? String ?? ""
+            let key = m["key"] as? String ?? ""
+            var title = "pid \(pid) · \(fmtAge(age)) · \(fmtBytes(bytesOf(m)))"
+            if !project.isEmpty { title += " · \(String(project.suffix(18)))" }
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            let actions = NSMenu()
+            actions.autoenablesItems = false
+            let cmdLines = hardWrap(m["command"] as? String ?? "", 46)
+            for line in cmdLines { addInfo(actions, line) }
+            if !cmdLines.isEmpty { actions.addItem(.separator()) }
+            actions.addItem(single("Keep this instance", #selector(keepInstance(_:)), key))
+            actions.addItem(single("Terminate…", #selector(killOneConfirm(_:)), key))
+            actions.addItem(single("Force Kill…", #selector(forceKill(_:)), key))
+            item.submenu = actions
+            menu.addItem(item)
+        }
+        let rest = ordered.dropFirst(shown.count)
+        if !rest.isEmpty {
+            addInfo(menu, "… \(rest.count) smaller · \(fmtBytes(rest.reduce(UInt64(0)) { $0 + bytesOf($1) }))")
+        }
+        return menu
     }
 
     private func flagItem(_ r: Row, compact: Bool = false) -> NSMenuItem {
@@ -218,6 +283,31 @@ final class MenuController: NSObject, NSMenuDelegate {
         ])
         item.isEnabled = false
         menu.addItem(item)
+    }
+
+    // Like wrap, but also splits tokens longer than the width (paths have no
+    // spaces, and a single long path must not dictate the menu's width).
+    private func hardWrap(_ text: String, _ width: Int, maxLines: Int = 4) -> [String] {
+        var lines: [String] = []
+        var current = ""
+        for word in text.split(separator: " ") {
+            var w = String(word)
+            while w.count > width {
+                if !current.isEmpty {
+                    lines.append(current); current = ""
+                    if lines.count >= maxLines { return lines }
+                }
+                lines.append(String(w.prefix(width)))
+                w = String(w.dropFirst(width))
+                if lines.count >= maxLines { return lines }
+            }
+            if current.isEmpty { current = w }
+            else if current.count + 1 + w.count <= width { current += " " + w }
+            else { lines.append(current); current = w }
+            if lines.count >= maxLines { return lines }
+        }
+        if !current.isEmpty && lines.count < maxLines { lines.append(current) }
+        return lines
     }
 
     private func wrap(_ text: String, _ width: Int) -> [String] {
@@ -276,8 +366,15 @@ final class MenuController: NSObject, NSMenuDelegate {
     @objc func keepMany(_ sender: NSMenuItem) { keepProject(sender) }
 
     private func killAsync(_ list: [String], force: Bool) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            for k in list { _ = self?.daemonRequest(["cmd": "kill", "key": k, "force": force]) }
+        // Daemon handles connections concurrently and each kill may poll ~3s for
+        // exit confirmation, so issue the batch in parallel rather than serially.
+        let group = DispatchGroup()
+        for k in list {
+            DispatchQueue.global(qos: .userInitiated).async(group: group) { [weak self] in
+                _ = self?.daemonRequest(["cmd": "kill", "key": k, "force": force])
+            }
+        }
+        group.notify(queue: .global(qos: .userInitiated)) { [weak self] in
             self?.refreshIcon()
         }
     }
@@ -286,11 +383,23 @@ final class MenuController: NSObject, NSMenuDelegate {
         killAsync(keys(sender), force: false)
     }
 
+    // Breakdown members are arbitrary healthy processes, not vetted stale flags -
+    // a single click there must not be able to take down a live session.
+    @objc func killOneConfirm(_ sender: NSMenuItem) {
+        let alert = NSAlert()
+        alert.messageText = "Terminate this process?"
+        alert.informativeText = "Identity is revalidated, then SIGTERM. If it survives, it keeps running - recheck the breakdown."
+        alert.addButton(withTitle: "Terminate")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        killAsync(keys(sender), force: false)
+    }
+
     @objc func killMany(_ sender: NSMenuItem) {
         let list = keys(sender)
         let alert = NSAlert()
         alert.messageText = "Terminate \(list.count) processes?"
-        alert.informativeText = "Each gets identity revalidation and SIGTERM. Survivors stay flagged."
+        alert.informativeText = "Each gets identity revalidation and SIGTERM. Anything that survives keeps running and stays visible here."
         alert.addButton(withTitle: "Terminate All")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }

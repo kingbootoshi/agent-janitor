@@ -69,6 +69,29 @@ public final class SocketServer {
         }
     }
 
+    private func topReply(limit: Int, includeMembers: Bool) -> [String: Any] {
+        let (groups, otherBytes, otherCount) = monitor.sync { $0.topDetail(limit: limit) }
+        var reply: [String: Any] = ["ok": true]
+        reply["groups"] = groups.map { g -> [String: Any] in
+            var dict: [String: Any] = ["sig": g.group.signature, "count": g.group.count, "bytes": g.group.bytes]
+            if includeMembers {
+                dict["members"] = g.members.map {
+                    ["key": $0.keyId, "pid": Int($0.pid), "age_s": $0.ageSeconds,
+                     "bytes": $0.footprint, "project": $0.project, "command": $0.command] as [String: Any]
+                }
+            }
+            return dict
+        }
+        reply["other_bytes"] = otherBytes
+        reply["other_count"] = otherCount
+        if let vm = Probe.vmBreakdown() {
+            reply["vm"] = ["physical": vm.physical, "app": vm.appBytes, "wired": vm.wiredBytes,
+                           "compressed": vm.compressedBytes, "cached": vm.cachedBytes,
+                           "used": vm.usedBytes, "swap_mb": Probe.swapUsedMB()]
+        }
+        return reply
+    }
+
     private func dispatch(_ cmd: String, _ obj: [String: Any]) -> [String: Any] {
         switch cmd {
         case "summary":
@@ -84,18 +107,9 @@ public final class SocketServer {
                   let arr = try? JSONSerialization.jsonObject(with: data) else { return ["ok": false] }
             return ["ok": true, "flags": arr]
         case "top":
-            let limit = obj["n"] as? Int ?? 8
-            let (groups, otherBytes, otherCount) = monitor.sync { $0.topConsumers(limit: limit) }
-            var reply: [String: Any] = ["ok": true]
-            reply["groups"] = groups.map { ["sig": $0.signature, "count": $0.count, "bytes": $0.bytes] }
-            reply["other_bytes"] = otherBytes
-            reply["other_count"] = otherCount
-            if let vm = Probe.vmBreakdown() {
-                reply["vm"] = ["physical": vm.physical, "app": vm.appBytes, "wired": vm.wiredBytes,
-                               "compressed": vm.compressedBytes, "cached": vm.cachedBytes,
-                               "used": vm.usedBytes, "swap_mb": Probe.swapUsedMB()]
-            }
-            return reply
+            return topReply(limit: obj["n"] as? Int ?? 8, includeMembers: false)
+        case "top_detail":
+            return topReply(limit: obj["n"] as? Int ?? 8, includeMembers: true)
         case "keep":
             guard let keyId = obj["key"] as? String else { return ["ok": false, "error": "key required"] }
             let scope = obj["scope"] as? String ?? "instance"

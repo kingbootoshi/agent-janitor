@@ -342,17 +342,43 @@ public final class Monitor {
         public var bytes: UInt64
     }
 
+    public struct GroupMember {
+        public var keyId: String
+        public var pid: Int32
+        public var ageSeconds: Int
+        public var footprint: UInt64
+        public var project: String
+        public var command: String
+    }
+
     public func topConsumers(limit: Int) -> (groups: [ConsumerGroup], otherBytes: UInt64, otherCount: Int) {
-        var bySig: [String: (Int, UInt64)] = [:]
-        for (_, info) in tracked where info.footprint > 0 {
-            let cur = bySig[info.signature] ?? (0, 0)
-            bySig[info.signature] = (cur.0 + 1, cur.1 + info.footprint)
+        let d = topDetail(limit: limit)
+        return (d.groups.map(\.group), d.otherBytes, d.otherCount)
+    }
+
+    public func topDetail(limit: Int) -> (groups: [(group: ConsumerGroup, members: [GroupMember])], otherBytes: UInt64, otherCount: Int) {
+        let now = UInt64(Date().timeIntervalSince1970)
+        let bySig = Dictionary(grouping: tracked.values.filter { $0.footprint > 0 }, by: \.signature)
+        var sorted: [(group: ConsumerGroup, members: [GroupMember])] = []
+        for (sig, infos) in bySig {
+            let bytes = infos.reduce(UInt64(0)) { $0 + $1.footprint }
+            let members = infos.sorted { $0.footprint > $1.footprint }.map { info in
+                GroupMember(
+                    keyId: info.key.id,
+                    pid: info.key.pid,
+                    ageSeconds: now >= info.key.startSec ? Int(now - info.key.startSec) : 0,
+                    footprint: info.footprint,
+                    project: info.project,
+                    command: String(info.argv.joined(separator: " ").prefix(120)))
+            }
+            sorted.append((group: ConsumerGroup(signature: sig, count: infos.count, bytes: bytes), members: members))
         }
-        let sorted = bySig.map { ConsumerGroup(signature: $0.key, count: $0.value.0, bytes: $0.value.1) }
-            .sorted { $0.bytes > $1.bytes }
+        sorted.sort { $0.group.bytes > $1.group.bytes }
         let top = Array(sorted.prefix(limit))
         let rest = sorted.dropFirst(limit)
-        return (top, rest.reduce(0) { $0 + $1.bytes }, rest.reduce(0) { $0 + $1.count })
+        let restBytes = rest.reduce(UInt64(0)) { $0 + $1.group.bytes }
+        let restCount = rest.reduce(0) { $0 + $1.group.count }
+        return (top, restBytes, restCount)
     }
 
     public func flagList() -> [FlagRecord] {
